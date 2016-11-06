@@ -26,6 +26,7 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Properties;
 import java.util.stream.Collectors;
@@ -82,7 +83,7 @@ public final class InvokeSoap extends AbstractMojo {
     @Parameter(property = "cxf.invoke.operation", required = true)
     private String operation;
 
-    @Parameter(property = "cxf.invoke.port", required = true)
+    @Parameter(property = "cxf.invoke.port", required = false)
     private String portName;
 
     @Parameter(readonly = true, defaultValue = "${project}")
@@ -130,6 +131,58 @@ public final class InvokeSoap extends AbstractMojo {
         extractProperties(responseFile);
     }
 
+    private void log(final String type, final File source) throws MojoExecutionException {
+        final Log log = getLog();
+        if (log.isDebugEnabled()) {
+            final StringWriter out = new StringWriter();
+            out.write(type);
+            out.write(": ");
+
+            try {
+                Files.lines(Paths.get(source.getCanonicalPath())).forEach(out::write);
+            } catch (final IOException e) {
+                throw new MojoExecutionException("Unable to serialise " + type + " for log", e);
+            }
+
+            log.debug(out.toString());
+        }
+    }
+
+    QName determinePort(final Service service) throws MojoExecutionException {
+        if (portName != null) {
+            return new QName(namespace, portName);
+        }
+
+        final Iterator<QName> ports = service.getPorts();
+
+        if (ports.hasNext()) {
+            final QName port = ports.next();
+
+            if (ports.hasNext()) {
+                throw new MojoExecutionException("Found more than one port type defined in specified WSDL `" + wsdl
+                        + "`, please specify which one to use with `portName` configuration option");
+            }
+            return port;
+        } else {
+            throw new MojoExecutionException(
+                    "Given WSDL `" + wsdl + "` does not specify any port types, please specify one to use with "
+                            + "`portName` configuration option");
+        }
+    }
+
+    Document document() throws MojoExecutionException {
+        final DocumentBuilderFactory documentBuilderFactory = DocumentBuilderFactory.newInstance();
+        documentBuilderFactory.setNamespaceAware(true);
+        DocumentBuilder documentBuilder;
+        try {
+            documentBuilder = documentBuilderFactory.newDocumentBuilder();
+        } catch (final ParserConfigurationException e) {
+            throw new MojoExecutionException("Unable create XML document builder", e);
+        }
+
+        return documentBuilder.newDocument();
+    }
+
     void extractProperties(final File responseFile) throws MojoExecutionException {
         if (properties.isEmpty()) {
             return;
@@ -163,36 +216,6 @@ public final class InvokeSoap extends AbstractMojo {
         projectProperties.putAll(values);
     }
 
-    private void log(final String type, final File source) throws MojoExecutionException {
-        final Log log = getLog();
-        if (log.isDebugEnabled()) {
-            final StringWriter out = new StringWriter();
-            out.write(type);
-            out.write(": ");
-
-            try {
-                Files.lines(Paths.get(source.getCanonicalPath())).forEach(out::write);
-            } catch (final IOException e) {
-                throw new MojoExecutionException("Unable to serialise " + type + " for log", e);
-            }
-
-            log.debug(out.toString());
-        }
-    }
-
-    Document document() throws MojoExecutionException {
-        final DocumentBuilderFactory documentBuilderFactory = DocumentBuilderFactory.newInstance();
-        documentBuilderFactory.setNamespaceAware(true);
-        DocumentBuilder documentBuilder;
-        try {
-            documentBuilder = documentBuilderFactory.newDocumentBuilder();
-        } catch (final ParserConfigurationException e) {
-            throw new MojoExecutionException("Unable create XML document builder", e);
-        }
-
-        return documentBuilder.newDocument();
-    }
-
     File invokeService() throws MojoExecutionException {
         final Service service;
         try {
@@ -201,8 +224,9 @@ public final class InvokeSoap extends AbstractMojo {
             throw new MojoExecutionException("Unable to convert `" + wsdl + "` to URL", e);
         }
 
-        final Dispatch<Source> dispatch = service.createDispatch(new QName(namespace, portName), Source.class,
-                Service.Mode.PAYLOAD);
+        final QName port = determinePort(service);
+
+        final Dispatch<Source> dispatch = service.createDispatch(port, Source.class, Service.Mode.PAYLOAD);
 
         final File executionDir = new File(requestPath, mojoExecution.getExecutionId());
 
