@@ -23,11 +23,14 @@ Here is an example -- place it in your `<build>` `<plugins>` section of your `po
             <portName>GlobalWeatherSoap12</portName>
             <operation>GetWeather</operation>
             <request>
-            	<GetWeather xmlns="http://www.webserviceX.NET">
-            		<CityName>Berlin-Tegel</CityName>
-            		<CountryName>Germany</CountryName>
-            	</GetWeather>
+              <GetWeather xmlns="http://www.webserviceX.NET">
+                <CityName>Berlin-Tegel</CityName>
+                <CountryName>Germany</CountryName>
+              </GetWeather>
             </request>
+            <properties>
+              <weather>//*[local-name() = 'GetWeatherResult']</weather>
+            <properties>
           </configuration>
         </execution>
       </executions>
@@ -38,6 +41,8 @@ and invoke the service `http://www.webserviceX.NET:GlobalWeather` over `http://w
 `http://www.webserviceX.NET:GetWeather` operation with the specified raw SOAP request (it will be placed in the `Body` of SOAP
 `Envelope`).
 
+The response of the SOAP service is parsed and using XPATH expression property named `weather` is extracted, this can
+be used in the rest of the Maven execution.
+
 The SOAP request and the SOAP response are written into files called `request.xml` and `response.xml` in the projects
 `target/get-weather` directory, named afer the execution id.
-

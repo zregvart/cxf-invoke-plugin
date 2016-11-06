@@ -25,8 +25,16 @@ import java.net.MalformedURLException;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Properties;
+import java.util.stream.Collectors;
 
+import javax.xml.XMLConstants;
 import javax.xml.namespace.QName;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.stream.XMLStreamException;
 import javax.xml.transform.Source;
 import javax.xml.transform.Transformer;
@@ -34,11 +42,20 @@ import javax.xml.transform.TransformerConfigurationException;
 import javax.xml.transform.TransformerException;
 import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.TransformerFactoryConfigurationError;
+import javax.xml.transform.dom.DOMResult;
+import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
 import javax.xml.transform.stream.StreamSource;
 import javax.xml.ws.Dispatch;
 import javax.xml.ws.Service;
 import javax.xml.ws.handler.MessageContext;
+import javax.xml.xpath.XPath;
+import javax.xml.xpath.XPathConstants;
+import javax.xml.xpath.XPathExpression;
+import javax.xml.xpath.XPathExpressionException;
+import javax.xml.xpath.XPathFactory;
+
+import org.w3c.dom.Document;
 
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecution;
@@ -47,6 +64,7 @@ import org.apache.maven.plugin.logging.Log;
 import org.apache.maven.plugins.annotations.LifecyclePhase;
 import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
+import org.apache.maven.project.MavenProject;
 import org.codehaus.plexus.configuration.PlexusConfiguration;
 
 /**
@@ -67,6 +85,12 @@ public final class InvokeSoap extends AbstractMojo {
     @Parameter(property = "cxf.invoke.port", required = true)
     private String portName;
 
+    @Parameter(readonly = true, defaultValue = "${project}")
+    private MavenProject project;
+
+    @Parameter(property = "cxf.invoke.properties")
+    private final Map<String, String> properties = new HashMap<>();
+
     @Parameter(property = "cxf.invoke.request", required = true)
     private PlexusConfiguration request;
 
@@ -83,7 +107,9 @@ public final class InvokeSoap extends AbstractMojo {
 
     public InvokeSoap() {
         try {
-            transformer = TransformerFactory.newInstance().newTransformer();
+            final TransformerFactory transformerFactory = TransformerFactory.newInstance();
+            transformerFactory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+            transformer = transformerFactory.newTransformer();
         } catch (TransformerConfigurationException | TransformerFactoryConfigurationError e) {
             throw new IllegalStateException("Unable to use JAXP API", e);
         }
@@ -99,6 +125,75 @@ public final class InvokeSoap extends AbstractMojo {
 
     @Override
     public void execute() throws MojoExecutionException {
+        final File responseFile = invokeService();
+
+        extractProperties(responseFile);
+    }
+
+    void extractProperties(final File responseFile) throws MojoExecutionException {
+        if (properties.isEmpty()) {
+            return;
+        }
+
+        final Document document = document();
+
+        final DOMResult output = new DOMResult(document);
+        try {
+            transformer.transform(new StreamSource(responseFile), output);
+        } catch (final TransformerException e) {
+            throw new MojoExecutionException("Unable to parse response XML in file: `" + responseFile, e);
+        }
+
+        final XPathFactory xPathFactory = XPathFactory.newInstance();
+        final XPath xPath = xPathFactory.newXPath();
+
+        final Map<String, Object> values = properties.entrySet().stream()
+                .collect(Collectors.toMap(e -> e.getKey(), e -> {
+                    try {
+                        final XPathExpression expression = xPath.compile(e.getValue());
+
+                        return expression.evaluate(document, XPathConstants.STRING);
+                    } catch (final XPathExpressionException ex) {
+                        throw new IllegalArgumentException("Unable to get property " + e.getKey()
+                                + " from XML using XPath expression `" + e.getValue() + "`", ex);
+                    }
+                }));
+
+        final Properties projectProperties = project.getProperties();
+        projectProperties.putAll(values);
+    }
+
+    private void log(final String type, final File source) throws MojoExecutionException {
+        final Log log = getLog();
+        if (log.isDebugEnabled()) {
+            final StringWriter out = new StringWriter();
+            out.write(type);
+            out.write(": ");
+
+            try {
+                Files.lines(Paths.get(source.getCanonicalPath())).forEach(out::write);
+            } catch (final IOException e) {
+                throw new MojoExecutionException("Unable to serialise " + type + " for log", e);
+            }
+
+            log.debug(out.toString());
+        }
+    }
+
+    Document document() throws MojoExecutionException {
+        final DocumentBuilderFactory documentBuilderFactory = DocumentBuilderFactory.newInstance();
+        documentBuilderFactory.setNamespaceAware(true);
+        DocumentBuilder documentBuilder;
+        try {
+            documentBuilder = documentBuilderFactory.newDocumentBuilder();
+        } catch (final ParserConfigurationException e) {
+            throw new MojoExecutionException("Unable create XML document builder", e);
+        }
+
+        return documentBuilder.newDocument();
+    }
+
+    File invokeService() throws MojoExecutionException {
         final Service service;
         try {
             service = Service.create(wsdl.toURL(), new QName(namespace, serviceName));
@@ -125,31 +220,22 @@ public final class InvokeSoap extends AbstractMojo {
 
         final Source soapResponse = dispatch.invoke(soapRequest);
 
+        final Document document = document();
+        try {
+            transformer.transform(soapResponse, new DOMResult(document));
+        } catch (final TransformerException e) {
+            throw new MojoExecutionException("Unable to transform response source XML to DOM document", e);
+        }
+
         final File responseFile = new File(executionDir, "response.xml");
         try {
-            transformer.transform(soapResponse, new StreamResult(responseFile));
+            transformer.transform(new DOMSource(document), new StreamResult(responseFile));
         } catch (final TransformerException e) {
             throw new MojoExecutionException(
                     "Unable to serialise SOAP response `" + soapResponse + "` to file `" + responseFile + "`", e);
         }
 
         log("SOAP response", responseFile);
-    }
-
-    private void log(final String type, final File source) throws MojoExecutionException {
-        final Log log = getLog();
-        if (log.isDebugEnabled()) {
-            final StringWriter out = new StringWriter();
-            out.write(type);
-            out.write(": ");
-
-            try {
-                Files.lines(Paths.get(source.getCanonicalPath())).forEach(out::write);
-            } catch (final IOException e) {
-                throw new MojoExecutionException("Unable to serialise " + type + " for log", e);
-            }
-
-            log.debug(out.toString());
-        }
+        return responseFile;
     }
 }
