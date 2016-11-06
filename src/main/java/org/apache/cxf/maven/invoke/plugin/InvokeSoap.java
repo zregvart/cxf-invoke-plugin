@@ -47,6 +47,7 @@ import javax.xml.transform.dom.DOMResult;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
 import javax.xml.transform.stream.StreamSource;
+import javax.xml.ws.BindingProvider;
 import javax.xml.ws.Dispatch;
 import javax.xml.ws.Service;
 import javax.xml.ws.handler.MessageContext;
@@ -73,6 +74,9 @@ import org.codehaus.plexus.configuration.PlexusConfiguration;
  */
 @Mojo(name = "invoke-soap", defaultPhase = LifecyclePhase.NONE)
 public final class InvokeSoap extends AbstractMojo {
+
+    @Parameter(property = "cxf.invoke.endpoint", required = false)
+    private String endpoint;
 
     @Parameter(defaultValue = "${mojoExecution}", readonly = true)
     private MojoExecution mojoExecution;
@@ -240,7 +244,12 @@ public final class InvokeSoap extends AbstractMojo {
 
         log("SOAP request", requestFile);
 
-        dispatch.getRequestContext().put(MessageContext.WSDL_OPERATION, new QName(namespace, operation));
+        final Map<String, Object> requestContext = dispatch.getRequestContext();
+        requestContext.put(MessageContext.WSDL_OPERATION, new QName(namespace, operation));
+
+        if (endpoint != null) {
+            requestContext.put(BindingProvider.ENDPOINT_ADDRESS_PROPERTY, endpoint);
+        }
 
         final Source soapResponse = dispatch.invoke(soapRequest);
 
