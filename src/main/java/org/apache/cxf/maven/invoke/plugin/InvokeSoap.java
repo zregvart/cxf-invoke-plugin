@@ -19,12 +19,8 @@
 package org.apache.cxf.maven.invoke.plugin;
 
 import java.io.File;
-import java.io.IOException;
-import java.io.StringWriter;
 import java.net.MalformedURLException;
 import java.net.URI;
-import java.nio.file.Files;
-import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
@@ -59,10 +55,10 @@ import javax.xml.xpath.XPathFactory;
 
 import org.w3c.dom.Document;
 
+import org.apache.cxf.feature.LoggingFeature;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecution;
 import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugin.logging.Log;
 import org.apache.maven.plugins.annotations.LifecyclePhase;
 import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
@@ -133,23 +129,6 @@ public final class InvokeSoap extends AbstractMojo {
         final File responseFile = invokeService();
 
         extractProperties(responseFile);
-    }
-
-    private void log(final String type, final File source) throws MojoExecutionException {
-        final Log log = getLog();
-        if (log.isDebugEnabled()) {
-            final StringWriter out = new StringWriter();
-            out.write(type);
-            out.write(": ");
-
-            try {
-                Files.lines(Paths.get(source.getCanonicalPath())).forEach(out::write);
-            } catch (final IOException e) {
-                throw new MojoExecutionException("Unable to serialise " + type + " for log", e);
-            }
-
-            log.debug(out.toString());
-        }
     }
 
     QName determinePort(final Service service) throws MojoExecutionException {
@@ -223,7 +202,11 @@ public final class InvokeSoap extends AbstractMojo {
     File invokeService() throws MojoExecutionException {
         final Service service;
         try {
-            service = Service.create(wsdl.toURL(), new QName(namespace, serviceName));
+            if (getLog().isDebugEnabled()) {
+                service = Service.create(wsdl.toURL(), new QName(namespace, serviceName), new LoggingFeature());
+            } else {
+                service = Service.create(wsdl.toURL(), new QName(namespace, serviceName));
+            }
         } catch (final MalformedURLException e) {
             throw new MojoExecutionException("Unable to convert `" + wsdl + "` to URL", e);
         }
@@ -241,8 +224,6 @@ public final class InvokeSoap extends AbstractMojo {
         } catch (final XMLStreamException e) {
             throw new MojoExecutionException("Unable to process request", e);
         }
-
-        log("SOAP request", requestFile);
 
         final Map<String, Object> requestContext = dispatch.getRequestContext();
         requestContext.put(MessageContext.WSDL_OPERATION, new QName(namespace, operation));
@@ -268,7 +249,6 @@ public final class InvokeSoap extends AbstractMojo {
                     "Unable to serialise SOAP response `" + soapResponse + "` to file `" + responseFile + "`", e);
         }
 
-        log("SOAP response", responseFile);
         return responseFile;
     }
 }
