@@ -19,6 +19,7 @@
 package org.apache.cxf.maven.invoke.plugin;
 
 import java.io.File;
+import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.util.HashMap;
@@ -29,10 +30,6 @@ import java.util.stream.Collectors;
 
 import javax.xml.XMLConstants;
 import javax.xml.namespace.QName;
-import javax.xml.parsers.DocumentBuilder;
-import javax.xml.parsers.DocumentBuilderFactory;
-import javax.xml.parsers.ParserConfigurationException;
-import javax.xml.stream.XMLStreamException;
 import javax.xml.transform.Source;
 import javax.xml.transform.Transformer;
 import javax.xml.transform.TransformerConfigurationException;
@@ -42,28 +39,30 @@ import javax.xml.transform.TransformerFactoryConfigurationError;
 import javax.xml.transform.dom.DOMResult;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
-import javax.xml.transform.stream.StreamSource;
 import javax.xml.ws.BindingProvider;
 import javax.xml.ws.Dispatch;
 import javax.xml.ws.Service;
 import javax.xml.ws.handler.MessageContext;
-import javax.xml.xpath.XPath;
 import javax.xml.xpath.XPathConstants;
 import javax.xml.xpath.XPathExpression;
 import javax.xml.xpath.XPathExpressionException;
-import javax.xml.xpath.XPathFactory;
 
 import org.w3c.dom.Document;
 
+import org.xml.sax.SAXException;
+
 import org.apache.cxf.feature.LoggingFeature;
 import org.apache.maven.plugin.AbstractMojo;
+import org.apache.maven.plugin.MavenPluginManager;
 import org.apache.maven.plugin.MojoExecution;
 import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.plugins.annotations.Component;
 import org.apache.maven.plugins.annotations.LifecyclePhase;
 import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
 import org.apache.maven.project.MavenProject;
-import org.codehaus.plexus.configuration.PlexusConfiguration;
+
+import static org.apache.cxf.maven.invoke.plugin.XmlUtil.document;
 
 /**
  * Invoke SOAP service.
@@ -74,6 +73,9 @@ public final class InvokeSoap extends AbstractMojo {
     @Parameter(property = "cxf.invoke.endpoint", required = false)
     private String endpoint;
 
+    @Parameter(property = "cxf.invoke.headers", required = false)
+    private XmlString[] headers;
+
     @Parameter(defaultValue = "${mojoExecution}", readonly = true)
     private MojoExecution mojoExecution;
 
@@ -82,6 +84,9 @@ public final class InvokeSoap extends AbstractMojo {
 
     @Parameter(property = "cxf.invoke.operation", required = true)
     private String operation;
+
+    @Component
+    private MavenPluginManager pluginManager;
 
     @Parameter(property = "cxf.invoke.port", required = false)
     private String portName;
@@ -92,8 +97,14 @@ public final class InvokeSoap extends AbstractMojo {
     @Parameter(property = "cxf.invoke.properties")
     private final Map<String, String> properties = new HashMap<>();
 
+    @Parameter(property = "cxf.invoke.repeatInterval", required = false, defaultValue = "5000")
+    private int repeatInterval;
+
+    @Parameter(property = "cxf.invoke.repeatUntil", required = false)
+    private String repeatUntil;
+
     @Parameter(property = "cxf.invoke.request", required = true)
-    private PlexusConfiguration request;
+    private XmlString[] request;
 
     @Parameter(property = "cxf.invoke.request.path", required = true, defaultValue = "${project.build.directory}")
     private File requestPath;
@@ -116,19 +127,28 @@ public final class InvokeSoap extends AbstractMojo {
         }
     }
 
-    static Source createRequest(final PlexusConfiguration configuration, final File file) throws XMLStreamException {
-        final PlexusConfiguration soapRequest = configuration.getChild(0);
-
-        PlexusConfigurationWriter.writeConfigurationTo(soapRequest, file);
-
-        return new StreamSource(file);
+    static Source createRequest(final String request) throws IOException, SAXException {
+        return new DOMSource(XmlUtil.parse(request));
     }
 
     @Override
     public void execute() throws MojoExecutionException {
-        final File responseFile = invokeService();
+        boolean first = true;
+        Document response;
+        do {
+            if (!first) {
+                try {
+                    Thread.sleep(repeatInterval);
+                } catch (final InterruptedException e) {
+                    return;
+                }
+            }
+            first = false;
 
-        extractProperties(responseFile);
+            response = invokeService();
+
+            extractProperties(response);
+        } while (shouldRepeat(response));
     }
 
     QName determinePort(final Service service) throws MojoExecutionException {
@@ -153,42 +173,17 @@ public final class InvokeSoap extends AbstractMojo {
         }
     }
 
-    Document document() throws MojoExecutionException {
-        final DocumentBuilderFactory documentBuilderFactory = DocumentBuilderFactory.newInstance();
-        documentBuilderFactory.setNamespaceAware(true);
-        DocumentBuilder documentBuilder;
-        try {
-            documentBuilder = documentBuilderFactory.newDocumentBuilder();
-        } catch (final ParserConfigurationException e) {
-            throw new MojoExecutionException("Unable create XML document builder", e);
-        }
-
-        return documentBuilder.newDocument();
-    }
-
-    void extractProperties(final File responseFile) throws MojoExecutionException {
+    void extractProperties(final Document response) throws MojoExecutionException {
         if (properties.isEmpty()) {
             return;
         }
 
-        final Document document = document();
-
-        final DOMResult output = new DOMResult(document);
-        try {
-            transformer.transform(new StreamSource(responseFile), output);
-        } catch (final TransformerException e) {
-            throw new MojoExecutionException("Unable to parse response XML in file: `" + responseFile, e);
-        }
-
-        final XPathFactory xPathFactory = XPathFactory.newInstance();
-        final XPath xPath = xPathFactory.newXPath();
-
         final Map<String, Object> values = properties.entrySet().stream()
                 .collect(Collectors.toMap(e -> e.getKey(), e -> {
                     try {
-                        final XPathExpression expression = xPath.compile(e.getValue());
+                        final XPathExpression expression = XmlUtil.xpathExpression(e.getValue());
 
-                        return expression.evaluate(document, XPathConstants.STRING);
+                        return expression.evaluate(response, XPathConstants.STRING);
                     } catch (final XPathExpressionException ex) {
                         throw new IllegalArgumentException("Unable to get property " + e.getKey()
                                 + " from XML using XPath expression `" + e.getValue() + "`", ex);
@@ -199,7 +194,7 @@ public final class InvokeSoap extends AbstractMojo {
         projectProperties.putAll(values);
     }
 
-    File invokeService() throws MojoExecutionException {
+    Document invokeService() throws MojoExecutionException {
         final Service service;
         try {
             if (getLog().isDebugEnabled()) {
@@ -211,18 +206,32 @@ public final class InvokeSoap extends AbstractMojo {
             throw new MojoExecutionException("Unable to convert `" + wsdl + "` to URL", e);
         }
 
+        if (headers != null) {
+            service.setHandlerResolver(new HeadersHandlerResolver(headers));
+        }
+
         final QName port = determinePort(service);
 
         final Dispatch<Source> dispatch = service.createDispatch(port, Source.class, Service.Mode.PAYLOAD);
 
         final File executionDir = new File(requestPath, mojoExecution.getExecutionId());
+        if (!executionDir.exists()) {
+            executionDir.mkdirs();
+        }
 
-        Source soapRequest;
+        final Source soapRequest;
+        try {
+            soapRequest = createRequest(request[0].getValue());
+        } catch (final IOException | SAXException e) {
+            throw new MojoExecutionException("Unable to process request", e);
+        }
+
         final File requestFile = new File(executionDir, "request.xml");
         try {
-            soapRequest = createRequest(request, requestFile);
-        } catch (final XMLStreamException e) {
-            throw new MojoExecutionException("Unable to process request", e);
+
+            transformer.transform(soapRequest, new StreamResult(requestFile));
+        } catch (final TransformerException e) {
+            throw new MojoExecutionException("Unable to store request XML to file `" + requestFile + "`", e);
         }
 
         final Map<String, Object> requestContext = dispatch.getRequestContext();
@@ -234,21 +243,34 @@ public final class InvokeSoap extends AbstractMojo {
 
         final Source soapResponse = dispatch.invoke(soapRequest);
 
-        final Document document = document();
+        final Document soapResponseDocument = document();
         try {
-            transformer.transform(soapResponse, new DOMResult(document));
+            transformer.transform(soapResponse, new DOMResult(soapResponseDocument));
         } catch (final TransformerException e) {
             throw new MojoExecutionException("Unable to transform response source XML to DOM document", e);
         }
 
         final File responseFile = new File(executionDir, "response.xml");
         try {
-            transformer.transform(new DOMSource(document), new StreamResult(responseFile));
+
+            transformer.transform(new DOMSource(soapResponseDocument), new StreamResult(responseFile));
         } catch (final TransformerException e) {
-            throw new MojoExecutionException(
-                    "Unable to serialise SOAP response `" + soapResponse + "` to file `" + responseFile + "`", e);
+            throw new MojoExecutionException("Unable to store request XML to file `" + requestFile + "`", e);
         }
 
-        return responseFile;
+        return soapResponseDocument;
+    }
+
+    boolean shouldRepeat(final Document response) throws MojoExecutionException {
+        if (repeatUntil == null) {
+            return false;
+        }
+
+        try {
+            return (boolean) XmlUtil.xpathExpression(repeatUntil).evaluate(response, XPathConstants.BOOLEAN);
+        } catch (final XPathExpressionException e) {
+            throw new MojoExecutionException("Unable to evaluate repeatUntil XPath expression `" + repeatUntil + "`",
+                    e);
+        }
     }
 }
