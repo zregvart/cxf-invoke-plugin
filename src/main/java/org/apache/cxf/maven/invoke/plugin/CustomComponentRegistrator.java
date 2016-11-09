@@ -18,9 +18,14 @@
  */
 package org.apache.cxf.maven.invoke.plugin;
 
+import java.io.IOException;
 import java.util.stream.Collectors;
 
 import static java.util.Arrays.stream;
+
+import org.w3c.dom.Node;
+
+import org.xml.sax.SAXException;
 
 import org.codehaus.plexus.component.annotations.Component;
 import org.codehaus.plexus.component.configurator.BasicComponentConfigurator;
@@ -35,11 +40,28 @@ import org.codehaus.plexus.configuration.PlexusConfiguration;
 import org.codehaus.plexus.personality.plexus.lifecycle.phase.Initializable;
 import org.codehaus.plexus.personality.plexus.lifecycle.phase.InitializationException;
 
+/**
+ * Custom component configuration that registers {@link ConfigurationToNodeConverter} to convert
+ * {@link PlexusConfiguration} to {@link Node} so that it can be injected into {@link org.apache.maven.plugin.Mojo}s.
+ */
 @Component(role = ComponentConfigurator.class, hint = "basic")
 public final class CustomComponentRegistrator extends BasicComponentConfigurator implements Initializable {
 
-    private static final class ConfigurationConverterImplementation implements ConfigurationConverter {
-        static String asXml(final PlexusConfiguration configuration) {
+    /**
+     * {@link ConfigurationConverter} that converts {@link PlexusConfiguration} to {@link Node}. It does this by
+     * converting the {@link PlexusConfiguration} to {@link String} and then parses this {@link String} to {@link Node}.
+     */
+    static final class ConfigurationToNodeConverter implements ConfigurationConverter {
+
+        /**
+         * Given {@link PlexusConfiguration} walk it's attributes and children and construct a XML String, verbatim as
+         * its placed in the POM XML.
+         *
+         * @param configuration
+         *            configuration property
+         * @return XML representation of the given configuration property
+         */
+        static String asString(final PlexusConfiguration configuration) {
             final StringBuilder value = new StringBuilder();
 
             value.append('<');
@@ -56,7 +78,7 @@ public final class CustomComponentRegistrator extends BasicComponentConfigurator
             value.append('>');
 
             for (final PlexusConfiguration child : configuration.getChildren()) {
-                value.append(asXml(child));
+                value.append(asString(child));
             }
 
             final String configurationValue = configuration.getValue();
@@ -71,11 +93,50 @@ public final class CustomComponentRegistrator extends BasicComponentConfigurator
             return value.toString();
         }
 
-        @Override
-        public boolean canConvert(@SuppressWarnings("rawtypes") final Class type) {
-            return XmlString.class.isAssignableFrom(type);
+        /**
+         * Performs the common conversion of {@link PlexusConfiguration} to {@link Node} mid-step it processes any
+         * expressions and re-evaluates them.
+         *
+         * @param configuration
+         *            configuration property
+         * @param expressionEvaluator
+         *            evaluator for expressions
+         * @return serialized, re-evaluated and parsed as XML
+         * @throws ComponentConfigurationException
+         *             if unable to evaluate expression or parse the XML
+         */
+        static Node fromConfiguration(final PlexusConfiguration configuration,
+                final ExpressionEvaluator expressionEvaluator) throws ComponentConfigurationException {
+            final String xmlStringValue = asString(configuration);
+
+            final String literalStringValue;
+            try {
+                // we need to reevaluate expressions for any properties defined in runtime and not set by Maven
+                literalStringValue = String.valueOf(expressionEvaluator.evaluate(xmlStringValue));
+            } catch (final ExpressionEvaluationException e) {
+                throw new ComponentConfigurationException(configuration, "Unable to evaluate expression", e);
+            }
+
+            try {
+                return XmlUtil.parse(literalStringValue);
+            } catch (SAXException | IOException e) {
+                throw new ComponentConfigurationException(configuration, e);
+            }
         }
 
+        /**
+         * Supports {@link Node} objects.
+         *
+         * {@inheritDoc}
+         */
+        @Override
+        public boolean canConvert(@SuppressWarnings("rawtypes") final Class type) {
+            return Node.class.isAssignableFrom(type);
+        }
+
+        /**
+         * {@inheritDoc}
+         */
         @Override
         public Object fromConfiguration(final ConverterLookup converterLookup, final PlexusConfiguration configuration,
                 @SuppressWarnings("rawtypes") final Class type, @SuppressWarnings("rawtypes") final Class baseType,
@@ -84,6 +145,9 @@ public final class CustomComponentRegistrator extends BasicComponentConfigurator
             return fromConfiguration(configuration, expressionEvaluator);
         }
 
+        /**
+         * {@inheritDoc}
+         */
         @Override
         public Object fromConfiguration(final ConverterLookup converterLookup, final PlexusConfiguration configuration,
                 @SuppressWarnings("rawtypes") final Class type, @SuppressWarnings("rawtypes") final Class baseType,
@@ -91,24 +155,22 @@ public final class CustomComponentRegistrator extends BasicComponentConfigurator
                 final ConfigurationListener listener) throws ComponentConfigurationException {
             return fromConfiguration(configuration, expressionEvaluator);
         }
-
-        Object fromConfiguration(final PlexusConfiguration configuration, final ExpressionEvaluator expressionEvaluator)
-                throws ComponentConfigurationException {
-            final String xmlStringValue = asXml(configuration);
-
-            final String literalStringValue;
-            try {
-                literalStringValue = String.valueOf(expressionEvaluator.evaluate(xmlStringValue));
-            } catch (final ExpressionEvaluationException e) {
-                throw new ComponentConfigurationException(configuration, "Unable to evaluate expression", e);
-            }
-
-            return new XmlString(literalStringValue);
-        }
     }
 
+    /**
+     * {@inheritDoc}
+     */
     @Override
     public void initialize() throws InitializationException {
-        converterLookup.registerConverter(new ConfigurationConverterImplementation());
+        converterLookup.registerConverter(new ConfigurationToNodeConverter());
+    }
+
+    /**
+     * Provide access to {@link ConverterLookup} for Unit tests.
+     *
+     * @return the converter lookup used
+     */
+    ConverterLookup getConverterLookup() {
+        return converterLookup;
     }
 }

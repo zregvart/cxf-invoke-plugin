@@ -18,7 +18,6 @@
  */
 package org.apache.cxf.maven.invoke.plugin;
 
-import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -38,35 +37,72 @@ import javax.xml.ws.handler.PortInfo;
 import javax.xml.ws.handler.soap.SOAPHandler;
 import javax.xml.ws.handler.soap.SOAPMessageContext;
 
+import org.w3c.dom.Document;
 import org.w3c.dom.Node;
 
-import org.xml.sax.SAXException;
-
+/**
+ * {@link HandlerResolver} that adds any SOAP headers given to the outgoing SOAP message.
+ */
 final class HeadersHandlerResolver implements HandlerResolver {
 
-    public class HeaderHandler implements SOAPHandler<SOAPMessageContext> {
+    /**
+     * {@link SOAPHandler} that performs the addition of given SOAP headers. SOAP headers are added from an array of
+     * {@link Node} objects given to the {@link HeadersHandlerResolver#HeadersHandlerResolver(Node[])} constructor.
+     */
+    final class HeaderHandler implements SOAPHandler<SOAPMessageContext> {
 
+        /**
+         * {@inheritDoc}
+         */
         @Override
         public void close(final MessageContext context) {
             // noop
         }
 
+        /**
+         * {@inheritDoc}
+         */
         @Override
         public Set<QName> getHeaders() {
             return Collections.emptySet();
         }
 
+        /**
+         * {@inheritDoc}
+         */
         @Override
         public boolean handleFault(final SOAPMessageContext context) {
-            return true;
+            return true; // proceed with the next handler
         }
 
+        /**
+         * Adds the given soap headers.
+         */
         @Override
         public boolean handleMessage(final SOAPMessageContext context) {
             if ((headers == null) || (headers.length == 0)) {
                 return true;
             }
 
+            final SOAPHeader soapHeader = soapHeaderFrom(context);
+
+            final Document ownerDocument = soapHeader.getOwnerDocument();
+            for (final Node header : headers) {
+                final Node headersNode = ownerDocument.importNode(header, true);
+
+                soapHeader.appendChild(headersNode);
+            }
+
+            return true;
+        }
+
+        /**
+         * Returns or creates {@link SOAPHeader} on the {@link SOAPMessage} in the {@link SOAPMessageContext}.
+         *
+         * @param context
+         * @return existing or newly added SOAP header
+         */
+        private SOAPHeader soapHeaderFrom(final SOAPMessageContext context) {
             final SOAPMessage soapMessage = context.getMessage();
             final SOAPPart soapPart = soapMessage.getSOAPPart();
             final SOAPHeader soapHeader;
@@ -83,31 +119,27 @@ final class HeadersHandlerResolver implements HandlerResolver {
             } catch (final SOAPException e) {
                 throw new IllegalStateException("Unable to create SOAP header", e);
             }
-
-            for (final XmlString header : headers) {
-                Node node;
-                try {
-                    node = XmlUtil.parse(header.getValue());
-                } catch (SAXException | IOException e) {
-                    throw new IllegalArgumentException("Unable to parse headers XML: `" + headers + "`", e);
-                }
-
-                final Node headersNode = soapHeader.getOwnerDocument().importNode(node, true);
-
-                soapHeader.appendChild(headersNode);
-            }
-
-            return true;
+            return soapHeader;
         }
 
     }
 
-    private final XmlString[] headers;
+    /** Headers to add. */
+    private final Node[] headers;
 
-    HeadersHandlerResolver(final XmlString[] headers) {
+    /**
+     * Pass in the headers to be added on the SOAP message.
+     *
+     * @param headers
+     *            headers to be added
+     */
+    HeadersHandlerResolver(final Node[] headers) {
         this.headers = headers;
     }
 
+    /**
+     * {@inheritDoc}
+     */
     @SuppressWarnings("rawtypes")
     @Override
     public List<Handler> getHandlerChain(final PortInfo portInfo) {

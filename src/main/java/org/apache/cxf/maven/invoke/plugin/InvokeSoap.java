@@ -19,7 +19,6 @@
 package org.apache.cxf.maven.invoke.plugin;
 
 import java.io.File;
-import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.util.HashMap;
@@ -28,14 +27,10 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.stream.Collectors;
 
-import javax.xml.XMLConstants;
 import javax.xml.namespace.QName;
 import javax.xml.transform.Source;
 import javax.xml.transform.Transformer;
-import javax.xml.transform.TransformerConfigurationException;
 import javax.xml.transform.TransformerException;
-import javax.xml.transform.TransformerFactory;
-import javax.xml.transform.TransformerFactoryConfigurationError;
 import javax.xml.transform.dom.DOMResult;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
@@ -48,15 +43,12 @@ import javax.xml.xpath.XPathExpression;
 import javax.xml.xpath.XPathExpressionException;
 
 import org.w3c.dom.Document;
-
-import org.xml.sax.SAXException;
+import org.w3c.dom.Node;
 
 import org.apache.cxf.feature.LoggingFeature;
 import org.apache.maven.plugin.AbstractMojo;
-import org.apache.maven.plugin.MavenPluginManager;
 import org.apache.maven.plugin.MojoExecution;
 import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugins.annotations.Component;
 import org.apache.maven.plugins.annotations.LifecyclePhase;
 import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
@@ -65,74 +57,104 @@ import org.apache.maven.project.MavenProject;
 import static org.apache.cxf.maven.invoke.plugin.XmlUtil.document;
 
 /**
- * Invoke SOAP service.
+ * Maven MOJO to invoke SOAP service in Maven execution. Not tied to any Maven lifecycle phase so configure your own
+ * executions.
  */
 @Mojo(name = "invoke-soap", defaultPhase = LifecyclePhase.NONE)
 public final class InvokeSoap extends AbstractMojo {
 
+    /** URL for the service where the request will be sent */
     @Parameter(property = "cxf.invoke.endpoint", required = false)
-    private String endpoint;
+    String endpoint;
 
+    /** SOAP headers to add in the request */
     @Parameter(property = "cxf.invoke.headers", required = false)
-    private XmlString[] headers;
+    Node[] headers;
 
+    /** {@link MojoExecution} needed to get execution id */
     @Parameter(defaultValue = "${mojoExecution}", readonly = true)
-    private MojoExecution mojoExecution;
+    MojoExecution mojoExecution;
 
+    /** Target namespace of the SOAP service */
     @Parameter(property = "cxf.invoke.namespace", required = true)
-    private String namespace;
+    String namespace;
 
+    /** Operation to invoke on the service */
     @Parameter(property = "cxf.invoke.operation", required = true)
-    private String operation;
+    String operation;
 
-    @Component
-    private MavenPluginManager pluginManager;
-
+    /** Port name of the SOAP service */
     @Parameter(property = "cxf.invoke.port", required = false)
-    private String portName;
+    String portName;
 
+    /** Needed to set any extracted properties */
     @Parameter(readonly = true, defaultValue = "${project}")
-    private MavenProject project;
+    MavenProject project;
 
+    /** Properties to extract from the SOAP response */
     @Parameter(property = "cxf.invoke.properties")
-    private final Map<String, String> properties = new HashMap<>();
+    final Map<String, String> properties = new HashMap<>();
 
+    /** If repeating, how long to wait before next invocation of the service, default 5 seconds */
     @Parameter(property = "cxf.invoke.repeatInterval", required = false, defaultValue = "5000")
-    private int repeatInterval;
+    int repeatInterval;
 
+    /** XPath expression to determine if the request should be repeated */
     @Parameter(property = "cxf.invoke.repeatUntil", required = false)
-    private String repeatUntil;
+    String repeatUntil;
 
+    /** Compiled XPath expression for repetition */
+    XPathExpression repeatUntilExpression;
+
+    /** SOAP request, Maven parameter conversion forces us to use array even if only has one element */
     @Parameter(property = "cxf.invoke.request", required = true)
-    private XmlString[] request;
+    Node[] request;
 
+    /** Path in which to store SOAP request and response XMLs */
     @Parameter(property = "cxf.invoke.request.path", required = true, defaultValue = "${project.build.directory}")
-    private File requestPath;
+    File requestPath;
 
+    /** Name of the SOAP service to invoke */
     @Parameter(property = "cxf.invoke.service", required = true)
-    private String serviceName;
+    String serviceName;
 
-    private Transformer transformer;
+    final Transformer transformer;
 
+    /** URL for the WSDL document of the SOAP service */
     @Parameter(property = "cxf.invoke.wsdl", required = true)
-    private URI wsdl;
+    URI wsdl;
 
     public InvokeSoap() {
-        try {
-            final TransformerFactory transformerFactory = TransformerFactory.newInstance();
-            transformerFactory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
-            transformer = transformerFactory.newTransformer();
-        } catch (TransformerConfigurationException | TransformerFactoryConfigurationError e) {
-            throw new IllegalStateException("Unable to use JAXP API", e);
-        }
+        this(XmlUtil.transformer());
     }
 
-    static Source createRequest(final String request) throws IOException, SAXException {
-        return new DOMSource(XmlUtil.parse(request));
+    InvokeSoap(final Transformer transformer) {
+        this.transformer = transformer;
     }
 
+    /**
+     * Given a request, return {@link Source}.
+     *
+     * @param request
+     * @return the source
+     */
+    static Source createRequest(final Node request) {
+        return new DOMSource(request);
+    }
+
+    /**
+     * Main MOJO entry point, invokes the SOAP service, repeats if needed, and extracts the properties in the end.
+     */
     @Override
     public void execute() throws MojoExecutionException {
+        if (repeatUntil != null) {
+            try {
+                repeatUntilExpression = XmlUtil.xpathExpression(repeatUntil);
+            } catch (final XPathExpressionException e) {
+                throw new MojoExecutionException("Unable to compile XPath expression `" + repeatUntil + "`", e);
+            }
+        }
+
         boolean first = true;
         Document response;
         do {
@@ -147,10 +169,47 @@ public final class InvokeSoap extends AbstractMojo {
 
             response = invokeService();
 
-            extractProperties(response);
         } while (shouldRepeat(response));
+
+        extractProperties(response);
     }
 
+    /**
+     * Creates {@link Service} using the {@link InvokeSoap#wsdl},{@link InvokeSoap#namespace} and
+     * {@link InvokeSoap#serviceName}, attaching any {@link InvokeSoap#headers} via {@link HeadersHandlerResolver}.
+     *
+     * @return created service
+     * @throws MojoExecutionException
+     *             if WSDL URL is malformed
+     */
+    Service createService() throws MojoExecutionException {
+        final Service service;
+        try {
+            if (getLog().isDebugEnabled()) {
+                service = Service.create(wsdl.toURL(), new QName(namespace, serviceName), new LoggingFeature());
+            } else {
+                service = Service.create(wsdl.toURL(), new QName(namespace, serviceName));
+            }
+        } catch (final MalformedURLException e) {
+            throw new MojoExecutionException("Unable to convert `" + wsdl + "` to URL", e);
+        }
+
+        if ((headers != null) && (headers.length != 0)) {
+            service.setHandlerResolver(new HeadersHandlerResolver(headers));
+        }
+        return service;
+    }
+
+    /**
+     * Returns SOAP port of the service to use. If specific port is specified use that, otherwise use the one port
+     * defined in WSDL.
+     *
+     * @param service
+     *            SOAP service
+     * @return SOAP port to use
+     * @throws MojoExecutionException
+     *             if there are none or more than one ports in the service when specific port has not been defined
+     */
     QName determinePort(final Service service) throws MojoExecutionException {
         if (portName != null) {
             return new QName(namespace, portName);
@@ -173,7 +232,16 @@ public final class InvokeSoap extends AbstractMojo {
         }
     }
 
-    void extractProperties(final Document response) throws MojoExecutionException {
+    /**
+     * Extracts properties defined by XPath expressions from the SOAP response.
+     *
+     * @param response
+     *            SOAP response
+     *
+     * @throws IllegalArgumentException
+     *             if XPath expression cannot be compiled or there is an error evaluating the expression
+     */
+    void extractProperties(final Document response) {
         if (properties.isEmpty()) {
             return;
         }
@@ -194,45 +262,35 @@ public final class InvokeSoap extends AbstractMojo {
         projectProperties.putAll(values);
     }
 
+    /**
+     * Invokes the SOAP service.
+     *
+     * @return SOAP response
+     * @throws MojoExecutionException
+     *             if unable to serialize request or response XML
+     * @throws javax.xml.ws.WebServiceException
+     *             see {@link Dispatch#invoke(Object)}
+     */
     Document invokeService() throws MojoExecutionException {
-        final Service service;
-        try {
-            if (getLog().isDebugEnabled()) {
-                service = Service.create(wsdl.toURL(), new QName(namespace, serviceName), new LoggingFeature());
-            } else {
-                service = Service.create(wsdl.toURL(), new QName(namespace, serviceName));
-            }
-        } catch (final MalformedURLException e) {
-            throw new MojoExecutionException("Unable to convert `" + wsdl + "` to URL", e);
-        }
-
-        if (headers != null) {
-            service.setHandlerResolver(new HeadersHandlerResolver(headers));
-        }
+        final Service service = createService();
 
         final QName port = determinePort(service);
-
-        final Dispatch<Source> dispatch = service.createDispatch(port, Source.class, Service.Mode.PAYLOAD);
 
         final File executionDir = new File(requestPath, mojoExecution.getExecutionId());
         if (!executionDir.exists()) {
             executionDir.mkdirs();
         }
 
-        final Source soapRequest;
-        try {
-            soapRequest = createRequest(request[0].getValue());
-        } catch (final IOException | SAXException e) {
-            throw new MojoExecutionException("Unable to process request", e);
-        }
+        final Source soapRequest = createRequest(request[0]);
 
         final File requestFile = new File(executionDir, "request.xml");
         try {
-
             transformer.transform(soapRequest, new StreamResult(requestFile));
         } catch (final TransformerException e) {
             throw new MojoExecutionException("Unable to store request XML to file `" + requestFile + "`", e);
         }
+
+        final Dispatch<Source> dispatch = service.createDispatch(port, Source.class, Service.Mode.PAYLOAD);
 
         final Map<String, Object> requestContext = dispatch.getRequestContext();
         requestContext.put(MessageContext.WSDL_OPERATION, new QName(namespace, operation));
@@ -252,7 +310,6 @@ public final class InvokeSoap extends AbstractMojo {
 
         final File responseFile = new File(executionDir, "response.xml");
         try {
-
             transformer.transform(new DOMSource(soapResponseDocument), new StreamResult(responseFile));
         } catch (final TransformerException e) {
             throw new MojoExecutionException("Unable to store request XML to file `" + requestFile + "`", e);
@@ -261,13 +318,22 @@ public final class InvokeSoap extends AbstractMojo {
         return soapResponseDocument;
     }
 
+    /**
+     * Determines if the request should be repeated by evaluating {@link InvokeSoap#repeatUntil} expression.
+     *
+     * @param response
+     *            SOAP response from the last invocation
+     * @return true if request should be repeated, false if not
+     * @throws MojoExecutionException
+     *             if the {@link InvokeSoap#repeatUntil} expression cannot be evaluated
+     */
     boolean shouldRepeat(final Document response) throws MojoExecutionException {
-        if (repeatUntil == null) {
+        if (repeatUntilExpression == null) {
             return false;
         }
 
         try {
-            return (boolean) XmlUtil.xpathExpression(repeatUntil).evaluate(response, XPathConstants.BOOLEAN);
+            return (boolean) repeatUntilExpression.evaluate(response, XPathConstants.BOOLEAN);
         } catch (final XPathExpressionException e) {
             throw new MojoExecutionException("Unable to evaluate repeatUntil XPath expression `" + repeatUntil + "`",
                     e);
